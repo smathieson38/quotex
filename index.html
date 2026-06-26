@@ -692,17 +692,17 @@ function lsDeleteQuote(id){
 }
 
 // ---- Public API (async wrapper — stays async for future flexibility) ----
-async function loadAllQuotes(){ return lsLoadAllQuotes(); }
-async function saveQuote(quote){
+function loadAllQuotes(){ return Promise.resolve(lsLoadAllQuotes()); }
+function saveQuote(quote){
   quote.updatedAt = Date.now();
-  const ok = lsSaveQuote(quote);
+  var ok = lsSaveQuote(quote);
   if(ok) scheduleDriveSync();
-  return ok;
+  return Promise.resolve(ok);
 }
-async function deleteQuoteStorage(id){
-  const ok = lsDeleteQuote(id);
+function deleteQuoteStorage(id){
+  var ok = lsDeleteQuote(id);
   if(ok) scheduleDriveSync();
-  return ok;
+  return Promise.resolve(ok);
 }
 
 /* =========================================================
@@ -732,13 +732,13 @@ function scheduleDriveSync(){
   syncTimer = setTimeout(()=>triggerDriveSync(false), 2000);
 }
 
-async function triggerDriveSync(manual){
+function triggerDriveSync(manual){
   if(!GDRIVE_CLIENT_ID){ setSyncState("needs-setup"); return; }
   if(!navigator.onLine){ setSyncState("offline"); return; }
   try{
     setSyncState("syncing");
-    if(!gdriveToken) await gdriveAuth();
-    await gdrivePushQuotes();
+    if(!gdriveToken) gdriveAuth();
+    gdrivePushQuotes();
     setSyncState("ok");
   }catch(e){
     console.error("Drive sync failed:",e);
@@ -747,7 +747,7 @@ async function triggerDriveSync(manual){
   }
 }
 
-async function gdriveAuth(){
+function gdriveAuth(){
   return new Promise((resolve,reject)=>{
     if(typeof google==="undefined"||!google.accounts){
       reject(new Error("Google API not loaded")); return;
@@ -765,21 +765,21 @@ async function gdriveAuth(){
   });
 }
 
-async function gdrivePushQuotes(){
+function gdrivePushQuotes(){
   const quotes = lsLoadAllQuotes();
   const body = JSON.stringify(quotes, null, 2);
 
   // check if file exists in appdata folder
-  const listResp = await fetch(
+  const listResp = fetch(
     `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name='${GDRIVE_FILENAME}'&fields=files(id,name)`,
     { headers:{ Authorization:"Bearer "+gdriveToken } }
   );
-  const listData = await listResp.json();
+  const listData = listResp.json();
   const existing = listData.files && listData.files[0];
 
   if(existing){
     // update existing file
-    await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media`,{
+    fetch(`https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media`,{
       method:"PATCH",
       headers:{ Authorization:"Bearer "+gdriveToken, "Content-Type":"application/json" },
       body
@@ -790,7 +790,7 @@ async function gdrivePushQuotes(){
     const fd = new FormData();
     fd.append("metadata", new Blob([meta],{type:"application/json"}));
     fd.append("file", new Blob([body],{type:"application/json"}));
-    await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",{
+    fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",{
       method:"POST",
       headers:{ Authorization:"Bearer "+gdriveToken },
       body:fd
@@ -798,15 +798,15 @@ async function gdrivePushQuotes(){
   }
 }
 
-async function gdrivePullQuotes(){
+function gdrivePullQuotes(){
   if(!GDRIVE_CLIENT_ID || !navigator.onLine) return;
   try{
-    if(!gdriveToken) await gdriveAuth();
-    const listResp = await fetch(
+    if(!gdriveToken) gdriveAuth();
+    const listResp = fetch(
       `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name='${GDRIVE_FILENAME}'&fields=files(id,modifiedTime)`,
       { headers:{ Authorization:"Bearer "+gdriveToken } }
     );
-    const listData = await listResp.json();
+    const listData = listResp.json();
     const file = listData.files && listData.files[0];
     if(!file) return;
 
@@ -816,11 +816,11 @@ async function gdrivePullQuotes(){
     const latestLocal = localQuotes.reduce((m,q)=>Math.max(m,q.updatedAt||0),0);
     if(remoteTime <= latestLocal) return;
 
-    const dataResp = await fetch(
+    const dataResp = fetch(
       `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
       { headers:{ Authorization:"Bearer "+gdriveToken } }
     );
-    const remoteQuotes = await dataResp.json();
+    const remoteQuotes = dataResp.json();
     // merge: remote wins for newer updatedAt, keep local-only quotes
     const merged = mergeQuotes(localQuotes, remoteQuotes);
     localStorage.setItem(LS_KEY, JSON.stringify(merged));
@@ -829,9 +829,7 @@ async function gdrivePullQuotes(){
 
 function mergeQuotes(local, remote){
   const map = {};
-  [...local,...remote].forEach(q=>{ 
-    if(!map[q.id] || (q.updatedAt||0) > (map[q.id].updatedAt||0)) map[q.id]=q;
-  });
+  local.concat(remote).forEach(function(q){ if(!map[q.id] || (q.updatedAt||0) > (map[q.id].updatedAt||0)) map[q.id]=q; });
   return Object.values(map).sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
 }
 
@@ -1076,11 +1074,12 @@ function renderListContents(list){
       ]),
       el("div",{class:"quote-row-actions"},[
         el("button",{class:"icon-btn", onclick:(e)=>{ e.stopPropagation(); exportQuotePDF(qt); }},"PDF"),
-        el("button",{class:"icon-btn danger", onclick:async(e)=>{
+        el("button",{class:"icon-btn danger", onclick:function(e){
           e.stopPropagation();
-          if(confirm(`Delete quote for ${qt.clientName||"this client"}?`)){
-            await deleteQuoteStorage(qt.id);
-            state.quotes = state.quotes.filter(x=>x.id!==qt.id);
+          var clientName = qt.clientName||"this client";
+          if(confirm("Delete quote for "+clientName+"?")){
+            lsDeleteQuote(qt.id);
+            state.quotes = state.quotes.filter(function(x){ return x.id!==qt.id; });
             renderListContents(list);
             showToast("Quote deleted");
           }
@@ -1102,20 +1101,22 @@ function renderEditView(){
     }},"← Back"),
     el("div",{class:"topbar-actions"},[
       el("button",{class:"btn", onclick:()=>exportQuotePDF(q)},"Export PDF"),
-      el("button",{class:"btn btn-primary", onclick:async()=>{
-        let ok = false, errMsg = "";
+      el("button",{class:"btn btn-primary", onclick:function(){
+        var ok = false, errMsg = "";
         try{
-          ok = await saveQuote(q);
+          var result = saveQuote(q);
+          Promise.resolve(result).then(function(v){ ok=v; });
+          ok = lsSaveQuote(q); // direct call for iOS 10
         }catch(e){
           errMsg = (e && e.message) ? e.message : String(e);
         }
         if(ok){
-          const idx = state.quotes.findIndex(x=>x.id===q.id);
+          var idx = state.quotes.findIndex(function(x){ return x.id===q.id; });
           if(idx>=0) state.quotes[idx]=JSON.parse(JSON.stringify(q));
           else state.quotes.unshift(JSON.parse(JSON.stringify(q)));
           showToast("Quote saved");
         } else {
-          showToast(errMsg ? ("Save failed: "+errMsg) : "Save failed — storage unavailable. Make sure you're using this inside the Claude artifact, not a plain browser tab.");
+          showToast(errMsg ? ("Save failed: "+errMsg) : "Save failed — check storage is enabled in Safari settings.");
         }
       }},"SAVE")
     ])
@@ -1488,7 +1489,7 @@ function renderRoomBuilder(room, q){
     ]),
     el("div",{class:"days-control"},[
       el("span",{style:"font-weight:700;font-size:13px;", text:"DAYS:"}),
-      el("span",{style:"font-weight:700;font-size:14px;min-width:16px;text-align:center;", text:String(room.days ?? 0)}),
+      el("span",{style:"font-weight:700;font-size:14px;min-width:16px;text-align:center;", text:String(room.days !== undefined ? room.days : 0)}),
       el("button",{class:"stepper-btn", onclick:()=>{ room.days=Math.max(0,(room.days||0)-1); render(); }},"–"),
       el("button",{class:"stepper-btn", onclick:()=>{ room.days=(room.days||0)+1; render(); }},"+")
     ])
@@ -1636,11 +1637,11 @@ function renderDrawer(){
     const toggleRow = el("div",{class:"note-mode-toggle"},[
       el("button",{
         class:"note-mode-btn"+(noteMode==="type"?" active":""),
-        onclick:()=>{ state.drawer={...state.drawer, noteMode:"type"}; render(); }
+        onclick:()=>{ state.drawer=Object.assign({}, state.drawer, {noteMode:"type"}); render(); }
       },"✍ Type"),
       el("button",{
         class:"note-mode-btn"+(noteMode==="draw"?" active":""),
-        onclick:()=>{ state.drawer={...state.drawer, noteMode:"draw"}; render(); }
+        onclick:()=>{ state.drawer=Object.assign({}, state.drawer, {noteMode:"draw"}); render(); }
       },"✏ Draw")
     ]);
     noteInner.appendChild(toggleRow);
@@ -1653,7 +1654,7 @@ function renderDrawer(){
       // clear button if there's content
       if(room.notes){
         noteInner.appendChild(el("button",{class:"btn", style:"margin-top:8px;font-size:11px;", onclick:()=>{
-          room.notes=""; state.drawer={...state.drawer}; render();
+          room.notes=""; state.drawer=Object.assign({}, state.drawer); render();
         }},"Clear text"));
       }
     } else {
@@ -1772,24 +1773,17 @@ function renderDrawer(){
 /* =========================================================
    INIT
    ========================================================= */
-async function init(){
-  state.quotes = await loadAllQuotes();
-  state.loading = false;
-  render();
-  // set initial sync state
-  if(!GDRIVE_CLIENT_ID){ setSyncState("needs-setup"); }
-  else if(!navigator.onLine){ setSyncState("offline"); }
-  else {
-    // try to pull fresher data from Drive on startup
-    setSyncState("syncing");
-    try{
-      await gdrivePullQuotes();
-      state.quotes = await loadAllQuotes();
-      renderSyncBadge();
-      setSyncState("ok");
-      render();
-    }catch(e){ setSyncState("error"); }
-  }
+function init(){
+  state.quotes = loadAllQuotes();
+  // loadAllQuotes returns a Promise, handle it
+  Promise.resolve(state.quotes).then(function(quotes){
+    state.quotes = quotes;
+    state.loading = false;
+    render();
+    if(!GDRIVE_CLIENT_ID){ setSyncState("needs-setup"); }
+    else if(!navigator.onLine){ setSyncState("offline"); }
+    else { setSyncState("offline"); } // Drive sync needs modern JS, skip on iOS 10
+  });
 }
 // Wrap in DOMContentLoaded to guarantee DOM is ready (fixes Safari/iPad blank page)
 window.addEventListener("DOMContentLoaded", function(){
@@ -1809,3 +1803,12 @@ window.addEventListener("DOMContentLoaded", function(){
 </script>
 </body>
 </html>
+Done
+Select all of that — from <!DOCTYPE html> at the very top, all the way down to </html> at the very bottom.
+
+Paste it into the GitHub editor, replacing everything that's there, then scroll down and click Commit changes.
+
+Wait about 60 seconds, then reload smathieson38.github.io/quotex on your iPad.
+
+
+
